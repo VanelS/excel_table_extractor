@@ -1,13 +1,15 @@
 """
-app_excel_tables.py  — v4
+app_excel_tables.py  — v5
 ─────────────────────────
-Détection hybride de tableaux Excel avec 5 stratégies :
+Détection hybride de tableaux Excel — 7 stratégies :
 
-  1. Header Score souple (bold, fill, bordures, types de données)
-  2. Tolérance aux lignes vides (lookahead 2 lignes)
-  3. Détection par grille de bordures
+  1. Header Score souple avec gardes anti-total et anti-titre
+  2. Tolérance aux lignes vides (lookahead structurel)
+  3. Détection par grilles de bordures (complètes + externes seules)
   4. Profilage de types de données (cohérence verticale)
   5. Matrice de cellules pré-calculée (performance)
+  6. Détection de banded rows (alternance de 2 fills)
+  7. Pénalités décoratives (titres, totaux isolés, grande police)
 
 Lancement :
     pip install streamlit openpyxl pandas
@@ -219,7 +221,11 @@ class ExcelTableDetector:
         covered |= self._hybrid_tables(matrix, sheet_name, results, covered,
                                         max_r, max_c, ws)
 
-        # Passe 3 : Détection par grille de bordures
+        # Passe 2b : Détection par banded rows (alternance de fill)
+        covered |= self._banded_tables(matrix, sheet_name, results, covered,
+                                        max_r, max_c, ws)
+
+        # Passe 3 : Détection par bordures (grilles complètes + bordures externes)
         covered |= self._grid_tables(matrix, sheet_name, results, covered,
                                       max_r, max_c, ws)
 
@@ -290,7 +296,7 @@ class ExcelTableDetector:
         return covered
 
     # ────────────────────────────────────────────
-    #  Stratégie 1 : Header Score
+    #  Stratégie 1 : Header Score (avec anti-total)
     # ────────────────────────────────────────────
     def _header_score(self, matrix, row, c1, c2, max_r) -> float:
         """Évalue la probabilité qu'une ligne soit un en-tête de tableau."""
@@ -300,6 +306,43 @@ class ExcelTableDetector:
 
         if not non_empty:
             return 0
+
+        # ── Anti-total : pénaliser si c'est probablement une ligne de total ──
+        # Signaux : bold + border_top + ligne précédente contient des données
+        # non-bold du même type → c'est un total, pas un header
+        all_bold = all(ci.bold for ci in non_empty)
+        any_top_border = any(ci.border_top for ci in cells)
+        if all_bold and any_top_border and row > 1:
+            prev_cells = [self._get(matrix, row - 1, c) for c in range(c1, c2 + 1)]
+            prev_non_empty = [ci for ci in prev_cells if ci.value is not None]
+            if prev_non_empty and not all(ci.bold for ci in prev_non_empty):
+                return -5
+
+        # Anti-total par mots-clés (multilingue)
+        total_keywords = {"total", "totaux", "sous-total", "subtotal",
+                          "sum", "somme", "grand total", "net", "solde"}
+        first_val = non_empty[0].value if non_empty else None
+        if (first_val and isinstance(first_val, str)
+                and first_val.strip().lower() in total_keywords
+                and any_top_border):
+            return -5
+
+        # ── Anti-titre : pénaliser les blocs de texte bold grande police ──
+        if non_empty and all(ci.font_size >= 16 for ci in non_empty):
+            if all(ci.data_type == "text" for ci in non_empty):
+                return -3
+
+        # ── Anti-données : un header ne contient presque jamais de nombres ──
+        # Pénaliser les lignes qui mélangent texte et nombres
+        types_in_row = set(ci.data_type for ci in non_empty)
+        has_numbers_in_row = bool(types_in_row & {"number", "date", "formula"})
+        has_text_in_row = "text" in types_in_row
+        if has_numbers_in_row and has_text_in_row:
+            # Mélange texte+nombres → probablement des données, pas un header
+            score -= 3
+        elif has_numbers_in_row and not has_text_in_row:
+            # Que des nombres → certainement pas un header
+            return -5
 
         # Critère 1 : Cellules en gras (+3)
         bold_ratio = sum(1 for ci in non_empty if ci.bold) / len(non_empty)
@@ -335,7 +378,50 @@ class ExcelTableDetector:
                     if next_types & {"number", "date", "formula"}:
                         score += 5
 
+        # Critère 5 : Banded rows en dessous (+3)
+        # Si les lignes suivantes alternent entre 2 fills → signal fort de tableau
+        if row + 2 <= max_r:
+            band_score = self._banded_rows_score(matrix, row + 1, c1, c2,
+                                                  min(row + 6, max_r))
+            if band_score >= 2:
+                score += 3
+
         return score
+
+    # ────────────────────────────────────────────
+    #  Détection de banded rows (alternance de fill)
+    # ────────────────────────────────────────────
+    def _banded_rows_score(self, matrix, start_row, c1, c2, end_row) -> float:
+        """Détecte si les lignes alternent entre 2 couleurs de fill."""
+        row_fills = []
+        for r in range(start_row, end_row + 1):
+            fills = set()
+            for c in range(c1, c2 + 1):
+                fk = self._get(matrix, r, c).fill_key
+                if fk:
+                    fills.add(fk)
+            if len(fills) == 1:
+                row_fills.append(fills.pop())
+            elif len(fills) == 0:
+                row_fills.append(None)
+            else:
+                return 0  # mélange → pas de banding
+
+        if len(row_fills) < 3:
+            return 0
+
+        # Compter les fills distincts (ignorer None)
+        distinct = set(f for f in row_fills if f is not None)
+        if len(distinct) != 2:
+            return 0
+
+        # Vérifier l'alternance
+        alternations = 0
+        for i in range(1, len(row_fills)):
+            if row_fills[i] != row_fills[i-1] and row_fills[i] is not None:
+                alternations += 1
+
+        return alternations
 
     # ────────────────────────────────────────────
     #  Passe 2 : Détection hybride
@@ -572,87 +658,299 @@ class ExcelTableDetector:
         return 10 * (consistent_cols / total_cols)
 
     # ────────────────────────────────────────────
-    #  Passe 3 : Détection par grille de bordures
-    #    (Stratégie 3)
+    #  Passe 2b : Détection par banded rows
+    #    Cherche des blocs où les lignes alternent
+    #    entre 2 fills → tableau quasi-certain même
+    #    sans header bold/fill
+    # ────────────────────────────────────────────
+    def _banded_tables(self, matrix, sheet, results, covered,
+                       max_r, max_c, ws) -> set:
+        new_covered = set()
+
+        # Scanner chaque colonne pour des séquences d'alternance de fill
+        # Regrouper les colonnes adjacentes partageant le même pattern
+        for c_start in range(1, max_c + 1):
+            if any((r, c_start) in covered or (r, c_start) in new_covered
+                   for r in range(1, min(max_r + 1, 5))):
+                continue
+
+            # Chercher le début d'une zone bandée dans cette colonne
+            for r_start in range(1, max_r - 2):
+                if (r_start, c_start) in covered or (r_start, c_start) in new_covered:
+                    continue
+
+                # Collecter les fills des lignes consécutives
+                row_fills = []
+                r_end = r_start
+                for r in range(r_start, max_r + 1):
+                    ci = self._get(matrix, r, c_start)
+                    if ci.value is None and ci.fill_key is None:
+                        break
+                    row_fills.append(ci.fill_key)
+                    r_end = r
+
+                if len(row_fills) < 4:
+                    continue
+
+                # Vérifier alternance entre exactement 2 fills
+                distinct = set(f for f in row_fills if f is not None)
+                if len(distinct) != 2:
+                    continue
+
+                alternations = sum(
+                    1 for i in range(1, len(row_fills))
+                    if row_fills[i] != row_fills[i-1]
+                    and row_fills[i] is not None
+                    and row_fills[i-1] is not None
+                )
+                if alternations < 2:
+                    continue
+
+                # Étendre vers la droite : colonnes partageant le même pattern
+                c_end = c_start
+                for c in range(c_start + 1, max_c + 1):
+                    col_fills = []
+                    for r in range(r_start, r_end + 1):
+                        ci = self._get(matrix, r, c)
+                        col_fills.append(ci.fill_key)
+                    if col_fills == row_fills:
+                        c_end = c
+                    else:
+                        break
+
+                num_cols = c_end - c_start + 1
+                num_rows = r_end - r_start
+                if num_cols < 2 or num_rows < 3:
+                    continue
+
+                # Vérifier pas déjà couvert
+                cells_set = set()
+                overlap = 0
+                for r in range(r_start, r_end + 1):
+                    for c in range(c_start, c_end + 1):
+                        if (r, c) in covered or (r, c) in new_covered:
+                            overlap += 1
+                        else:
+                            cells_set.add((r, c))
+
+                total_ct = (r_end - r_start + 1) * num_cols
+                if total_ct > 0 and overlap / total_ct > 0.3:
+                    continue
+
+                # Chercher un header au-dessus de la zone bandée
+                # (ligne juste avant r_start qui a du contenu mais pas le même fill)
+                hdr_row = None
+                if r_start > 1:
+                    prev_ci = self._get(matrix, r_start - 1, c_start)
+                    if prev_ci.value is not None:
+                        prev_fill = prev_ci.fill_key
+                        if prev_fill not in distinct:
+                            hdr_row = r_start - 1
+                            # Inclure le header dans la plage
+                            for c in range(c_start, c_end + 1):
+                                cells_set.add((hdr_row, c))
+
+                actual_start = hdr_row if hdr_row else r_start
+
+                # Scoring
+                score = 35  # base banded
+                score += 15 if num_cols >= 3 else 8
+                score += 15 if num_rows >= 3 else 8
+                score += self._type_consistency_score(matrix, actual_start,
+                                                      r_end, c_start, c_end)
+                # Densité
+                filled = sum(1 for r in range(actual_start, r_end + 1)
+                             for c in range(c_start, c_end + 1)
+                             if self._get(matrix, r, c).value is not None)
+                density = filled / max(total_ct, 1)
+                score += 10 if density >= 0.5 else 5 if density >= 0.3 else 0
+
+                score = min(score, 90)
+
+                title = self._find_section_title(matrix, actual_start,
+                                                  c_start, c_end, ws)
+                if not title:
+                    title = f"Banded_{get_column_letter(c_start)}{actual_start}"
+
+                headers = [str(self._get(matrix, actual_start, c).value or "")
+                           for c in range(c_start, c_end + 1)]
+
+                results.append(DetectedTable(
+                    sheet=sheet, title=title,
+                    top_left=f"{get_column_letter(c_start)}{actual_start}",
+                    bottom_right=f"{get_column_letter(c_end)}{r_end}",
+                    num_rows=r_end - actual_start, num_cols=num_cols,
+                    headers=headers, source="hybrid_detected",
+                    score=score, has_header_fill=hdr_row is not None,
+                ))
+                new_covered |= cells_set
+                break  # passer à la colonne suivante
+
+        return new_covered
+
+    # ────────────────────────────────────────────
+    #  Passe 3 : Détection par bordures
+    #    A) Grilles complètes (4 bordures)
+    #    B) Rectangles à bordures externes seules
     # ────────────────────────────────────────────
     def _grid_tables(self, matrix, sheet, results, covered,
                      max_r, max_c, ws) -> set:
         new_covered = set()
 
-        # Trouver les cellules avec 4 bordures, non couvertes
+        # ── A) Grilles complètes (all_borders) ──
         bordered = {
             pos for pos, ci in matrix.items()
             if ci.all_borders and pos not in covered and pos not in new_covered
         }
 
-        if not bordered:
-            return new_covered
+        if bordered:
+            blocks = self._flood_fill(bordered, gap=0)
+            for block in blocks:
+                self._score_grid_block(block, matrix, sheet, results,
+                                       new_covered, ws, "grid")
 
-        # Flood-fill strict (gap=0) sur les cellules bordurées
-        blocks = self._flood_fill(bordered, gap=0)
-
-        for block in blocks:
-            rows_b = [r for r, c in block]
-            cols_b = [c for r, c in block]
-            r1, r2, c1, c2 = min(rows_b), max(rows_b), min(cols_b), max(cols_b)
-            num_rows = r2 - r1
-            num_cols = c2 - c1 + 1
-
-            if num_rows < 1 or num_cols < 2:
-                continue
-
-            # Vérifier que c'est un rectangle bien rempli de bordures
-            expected = (r2 - r1 + 1) * num_cols
-            border_ratio = len(block) / max(expected, 1)
-            if border_ratio < 0.6:
-                continue
-
-            # Scoring
-            score = 30  # base grille
-            score += 15 if num_cols >= 3 else 8
-            score += 15 if num_rows >= 3 else 8
-            score += self._type_consistency_score(matrix, r1, r2, c1, c2)
-
-            # Densité de contenu
-            filled = sum(1 for r, c in block
-                         if self._get(matrix, r, c).value is not None)
-            density = filled / max(len(block), 1)
-            score += 10 if density >= 0.5 else 5 if density >= 0.3 else 0
-
-            # Première ligne bold → bonus
-            first_bold = all(
-                self._get(matrix, r1, c).bold
-                for c in range(c1, c2 + 1)
-                if self._get(matrix, r1, c).value is not None
-            )
-            if first_bold:
-                score += 5
-
-            score = min(score, 90)
-
-            title = self._find_section_title(matrix, r1, c1, c2, ws)
-            if not title:
-                title = f"Grille_{get_column_letter(c1)}{r1}"
-
-            headers = [str(self._get(matrix, r1, c).value or "")
-                       for c in range(c1, c2 + 1)]
-
-            cells_set = set()
-            for r in range(r1, r2 + 1):
-                for c in range(c1, c2 + 1):
-                    cells_set.add((r, c))
-
-            results.append(DetectedTable(
-                sheet=sheet, title=title,
-                top_left=f"{get_column_letter(c1)}{r1}",
-                bottom_right=f"{get_column_letter(c2)}{r2}",
-                num_rows=num_rows, num_cols=num_cols,
-                headers=headers, source="grid_detected", score=score,
-                has_grid_borders=True,
-            ))
-            new_covered |= cells_set
+        # ── B) Rectangles à bordures externes ──
+        # Chercher des cellules avec border_left en colonne, border_top en ligne, etc.
+        # Identifier les rectangles formés par les bordures périphériques
+        border_cells = {
+            pos for pos, ci in matrix.items()
+            if ci.has_any_border and pos not in covered and pos not in new_covered
+        }
+        if border_cells:
+            ext_blocks = self._detect_external_border_rects(
+                matrix, border_cells, covered | new_covered, max_r, max_c)
+            for block in ext_blocks:
+                self._score_grid_block(block, matrix, sheet, results,
+                                       new_covered, ws, "border_rect")
 
         return new_covered
+
+    def _detect_external_border_rects(self, matrix, border_cells, covered,
+                                       max_r, max_c) -> list[set]:
+        """Détecte les rectangles délimités par des bordures externes."""
+        rects = []
+
+        # Chercher les coins top-left (border_top + border_left)
+        corners = []
+        for (r, c), ci in matrix.items():
+            if (r, c) in covered:
+                continue
+            if ci.border_top and ci.border_left:
+                corners.append((r, c))
+
+        for (r1, c1) in corners:
+            # Chercher le coin top-right : même ligne, border_top + border_right
+            c2 = None
+            for c in range(c1 + 1, min(c1 + 20, max_c + 1)):
+                ci = self._get(matrix, r1, c)
+                if ci.border_top and ci.border_right:
+                    c2 = c
+                    break
+                if not ci.border_top and not ci.has_any_border and ci.value is None:
+                    break  # gap dans la bordure top → pas un rectangle
+
+            if c2 is None or c2 - c1 < 1:
+                continue
+
+            # Chercher le coin bottom-left : même colonne, border_bottom + border_left
+            r2 = None
+            for r in range(r1 + 1, min(r1 + 50, max_r + 1)):
+                ci = self._get(matrix, r, c1)
+                if ci.border_bottom and ci.border_left:
+                    r2 = r
+                    break
+                if not ci.border_left and not ci.has_any_border and ci.value is None:
+                    break
+
+            if r2 is None or r2 - r1 < 1:
+                continue
+
+            # Vérifier le coin bottom-right
+            ci_br = self._get(matrix, r2, c2)
+            if not (ci_br.border_bottom and ci_br.border_right):
+                continue
+
+            # Vérifier que le rectangle a du contenu
+            filled = sum(1 for r in range(r1, r2 + 1)
+                         for c in range(c1, c2 + 1)
+                         if self._get(matrix, r, c).value is not None)
+            total = (r2 - r1 + 1) * (c2 - c1 + 1)
+            if filled < total * 0.3:
+                continue
+
+            # Vérifier pas déjà couvert
+            overlap = sum(1 for r in range(r1, r2 + 1)
+                          for c in range(c1, c2 + 1)
+                          if (r, c) in covered)
+            if overlap > total * 0.3:
+                continue
+
+            block = set()
+            for r in range(r1, r2 + 1):
+                for c in range(c1, c2 + 1):
+                    block.add((r, c))
+            rects.append(block)
+
+        return rects
+
+    def _score_grid_block(self, block, matrix, sheet, results,
+                          new_covered, ws, source_tag):
+        """Score et enregistre un bloc détecté par bordures."""
+        rows_b = [r for r, c in block]
+        cols_b = [c for r, c in block]
+        r1, r2, c1, c2 = min(rows_b), max(rows_b), min(cols_b), max(cols_b)
+        num_rows = r2 - r1
+        num_cols = c2 - c1 + 1
+
+        if num_rows < 1 or num_cols < 2:
+            return
+
+        # Vérifier rectangularité
+        expected = (r2 - r1 + 1) * num_cols
+        if source_tag == "grid":
+            border_ratio = len(block) / max(expected, 1)
+            if border_ratio < 0.6:
+                return
+
+        score = 30  # base bordures
+        score += 15 if num_cols >= 3 else 8
+        score += 15 if num_rows >= 3 else 8
+        score += self._type_consistency_score(matrix, r1, r2, c1, c2)
+
+        filled = sum(1 for r, c in block
+                     if self._get(matrix, r, c).value is not None)
+        density = filled / max(len(block), 1)
+        score += 10 if density >= 0.5 else 5 if density >= 0.3 else 0
+
+        first_vals = [self._get(matrix, r1, c)
+                      for c in range(c1, c2 + 1)
+                      if self._get(matrix, r1, c).value is not None]
+        if first_vals and all(ci.bold for ci in first_vals):
+            score += 5
+
+        score = min(score, 90)
+
+        title = self._find_section_title(matrix, r1, c1, c2, ws)
+        if not title:
+            title = f"Grille_{get_column_letter(c1)}{r1}"
+
+        headers = [str(self._get(matrix, r1, c).value or "")
+                   for c in range(c1, c2 + 1)]
+
+        cells_set = set()
+        for r in range(r1, r2 + 1):
+            for c in range(c1, c2 + 1):
+                cells_set.add((r, c))
+
+        results.append(DetectedTable(
+            sheet=sheet, title=title,
+            top_left=f"{get_column_letter(c1)}{r1}",
+            bottom_right=f"{get_column_letter(c2)}{r2}",
+            num_rows=num_rows, num_cols=num_cols,
+            headers=headers, source="grid_detected", score=score,
+            has_grid_borders=True,
+        ))
+        new_covered |= cells_set
 
     # ────────────────────────────────────────────
     #  Passe 4 : Blocs résiduels (gap=0 strict)
@@ -708,8 +1006,26 @@ class ExcelTableDetector:
             font_sizes = [self._get(matrix, r, c).font_size
                           for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)
                           if self._get(matrix, r, c).value is not None]
-            if font_sizes and min(font_sizes) >= 18:
-                score = max(score - 15, 5)
+            if font_sizes and min(font_sizes) >= 16:
+                score = max(score - 20, 3)
+
+            # Pénalité titre multi-lignes : colonne unique + tout bold + tout texte
+            if num_cols == 1:
+                all_vals = [self._get(matrix, r, c1) for r in range(r1, r2 + 1)
+                            if self._get(matrix, r, c1).value is not None]
+                if all_vals and all(ci.bold for ci in all_vals):
+                    if all(ci.data_type == "text" for ci in all_vals):
+                        score = max(score - 25, 3)
+
+            # Pénalité titre multi-lignes : toutes les lignes bold + texte seul
+            all_block_vals = [self._get(matrix, r, c)
+                              for r in range(r1, r2 + 1) for c in range(c1, c2 + 1)
+                              if self._get(matrix, r, c).value is not None]
+            if (all_block_vals
+                    and all(ci.bold for ci in all_block_vals)
+                    and all(ci.data_type == "text" for ci in all_block_vals)
+                    and not has_numbers):
+                score = max(score - 15, 3)
 
             score = min(score, 55)
 
@@ -895,9 +1211,10 @@ h1, h2, h3 { font-family: 'DM Sans', sans-serif; font-weight: 700; }
 
 st.markdown("""
 <div class="header-bar">
-    <h1>📊 Excel Table Detector v4</h1>
-    <p>Détection hybride avancée — Header Score souple · Lookahead lignes vides ·
-       Grilles de bordures · Profilage de types · Matrice pré-calculée</p>
+    <h1>📊 Excel Table Detector v5</h1>
+    <p>Détection hybride avancée — Header Score avec gardes anti-total ·
+       Lookahead structurel · Banded rows · Bordures externes ·
+       Profilage de types · Pénalités décoratives</p>
 </div>
 """, unsafe_allow_html=True)
 
@@ -959,7 +1276,7 @@ with st.sidebar:
                                 "grid_detected": "🔲 Grille",
                                 "contiguous_block": "📦 Bloc"}[x],
     )
-    min_score = st.slider("Score minimum", 0, 100, 0, step=5)
+    min_score = st.slider("Score minimum", 0, 100, 40, step=5)
     min_rows = st.slider("Lignes minimum", 0, 20, 0)
     if len(selected_sheets) > 1:
         filter_sheets = st.multiselect("Feuille", selected_sheets, selected_sheets)
