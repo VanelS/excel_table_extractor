@@ -1,0 +1,52 @@
+# ─────────────────────────────────────────────────
+#  Configuration de détection de tableaux Excel
+#  Fichier : Book.xlsx
+# ─────────────────────────────────────────────────
+#
+#  Pour chaque feuille, listez les tableaux recherchés.
+#  Chaque indice est optionnel — plus vous en donnez,
+#  plus la détection sera précise.
+#
+#  Indices disponibles :
+#    table_title          : texte du titre de section au-dessus du tableau
+#    expected_headers     : liste (même partielle) des noms de colonnes
+#    expected_row_indexes : liste (même partielle) des labels de la colonne d'index
+#    has_total_row        : true si le tableau a une ligne de total en bas
+#    expected_columns     : nombre de colonnes attendu
+#    row_range            : [min, max] nombre de lignes de données attendu
+#
+#  Mode :
+#    strict: true → ne retourne QUE les tableaux qui matchent un hint
+#    strict: false (défaut) → retourne aussi les tableaux détectés sans hint
+
+strict: false
+
+sheets:
+  "Planificateur de budget fêtes":
+    tables:
+      - table_title: "CADEAUX"
+        expected_headers: ["Élément", "Budget", "Réel", "Écart"]
+        expected_row_indexes: ["Famille", "Amis", "Collègues", "Dons de bienfaisance"]
+        has_total_row: true
+
+      - table_title: "REPAS DE VACANCES"
+        expected_headers: ["Élément", "Budget", "Réel", "Écart"]
+        expected_row_indexes: ["Provisions", "Boissons alcoolisées", "Décorations"]
+        has_total_row: true
+
+      - table_title: "EMBALLAGE"
+        expected_headers: ["Élément", "Budget", "Réel", "Écart"]
+        has_total_row: true
+
+      - table_title: "LOISIRS"
+        expected_headers: ["Élément", "Budget", "Réel", "Écart"]
+        has_total_row: true
+
+      - table_title: "VOYAGE"
+        expected_headers: ["Élément", "Budget", "Réel", "Écart"]
+        expected_row_indexes: ["Avion", "Hébergement", "Transports"]
+        has_total_row: true
+
+      - table_title: "DIVERS"
+        expected_headers: ["Élément", "Budget", "Réel", "Écart"]
+        has_total_row: true
