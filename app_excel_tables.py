@@ -123,7 +123,7 @@ class DetectedTable:
     expanded_left: bool = False
     expanded_right: bool = False
     has_empty_rows: bool = False
-    matched_rules: list[str] = field(default_factory=list)
+    matched_rule: Optional[str] = None
 
     @property
     def range_str(self): return f"{self.top_left}:{self.bottom_right}"
@@ -269,7 +269,7 @@ class ExcelTableDetector:
 
         # Mode strict : ne garder que les tables matchées
         if config and config.strict:
-            results = [t for t in results if t.matched_rules]
+            results = [t for t in results if t.matched_rule is not None]
 
         return results
 
@@ -469,7 +469,7 @@ class ExcelTableDetector:
                 num_rows=num_rows, num_cols=num_cols,
                 headers=headers, source="hint_guided", score=score,
                 has_total_row=total_row is not None,
-                matched_rules=[hint.display_id],
+                matched_rule=hint.display_id,
             ))
             covered |= cells_set
 
@@ -570,9 +570,7 @@ class ExcelTableDetector:
     def _post_match_hints(self, results: list[DetectedTable],
                           hints: list[TableHint], matrix):
         # Collecter les IDs déjà matchés en passe 0
-        already_matched = set()
-        for t in results:
-            already_matched.update(t.matched_rules)
+        already_matched = {t.matched_rule for t in results if t.matched_rule}
 
         for hint in hints:
             hint_id = hint.display_id
@@ -583,15 +581,16 @@ class ExcelTableDetector:
             best_score = 0
 
             for t in results:
-                match_score = 0
+                # Ignorer les tables déjà associées à une règle
+                if t.matched_rule is not None:
+                    continue
 
+                match_score = 0
                 if hint.table_title and _fuzzy_match(hint.table_title, t.title):
                     match_score += 30
-
                 if hint.expected_headers and t.headers:
                     ratio = _match_ratio(hint.expected_headers, t.headers)
                     match_score += 40 * ratio
-
                 if hint.expected_columns and t.num_cols == hint.expected_columns:
                     match_score += 10
 
@@ -600,9 +599,9 @@ class ExcelTableDetector:
                     best_table = t
 
             if best_table and best_score >= 20:
-                if hint_id not in best_table.matched_rules:
-                    best_table.matched_rules.append(hint_id)
+                best_table.matched_rule = hint_id
                 best_table.score = min(best_table.score + 15, 100)
+                already_matched.add(hint_id)
 
     # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     #  Passe 1 : Tables Excel déclarées
@@ -1143,7 +1142,7 @@ ne = sum(1 for t in tables if t.source == "excel_table")
 nh = sum(1 for t in tables if t.source in ("hybrid_detected","hint_guided"))
 ng = sum(1 for t in tables if t.source == "grid_detected")
 nb = sum(1 for t in tables if t.source == "contiguous_block")
-nm = sum(1 for t in tables if t.matched_rules)
+nm = sum(1 for t in tables if t.matched_rule)
 avg = sum(t.score for t in tables) / max(len(tables), 1)
 
 st.markdown(f"""
@@ -1183,9 +1182,8 @@ for i, tbl in enumerate(filtered):
     ccls = {"haute":"conf-high","moyenne":"conf-medium","basse":"conf-low"}.get(tbl.confidence,"conf-low")
     bw = max(int(tbl.score*0.8), 5)
     pills = ""
-    if tbl.matched_rules:
-        for rule_id in tbl.matched_rules:
-            pills += f'<span class="pill pill-hint">Règle: {rule_id}</span>'
+    if tbl.matched_rule:
+        pills += f'<span class="pill pill-hint">Règle: {tbl.matched_rule}</span>'
     if tbl.has_header_fill: pills += '<span class="pill pill-fill">Fill en-tête</span>'
     if tbl.has_total_row: pills += '<span class="pill pill-total">Ligne total</span>'
     if tbl.has_grid_borders: pills += '<span class="pill pill-grid">Grille</span>'
