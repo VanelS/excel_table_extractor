@@ -1,0 +1,96 @@
+# .kilocodeignore — HERMES
+# Syntaxe identique à .gitignore. Kilo ne lit ni n'écrit les fichiers listés ici.
+# But : réduire la consommation de tokens et protéger les secrets/données.
+
+# --- Secrets & configuration locale -----------------------------------------
+.env
+.env.*
+!.env.example
+agent.env
+*.pem
+*.key
+*.crt
+
+# --- Environnements & dépendances -------------------------------------------
+.venv/
+venv/
+env/
+node_modules/
+**/node_modules/
+package-lock.json
+yarn.lock
+pnpm-lock.yaml
+poetry.lock
+uv.lock
+
+# --- Builds, caches, artefacts ----------------------------------------------
+dist/
+build/
+out/
+.angular/
+.nx/
+coverage/
+htmlcov/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+__pycache__/
+*.pyc
+*.egg-info/
+*.map
+*.min.js
+*.min.css
+
+# --- Données métier & bases (volumineuses, inutiles pour coder) -------------
+# On garde les définitions de contrôles versionnées, utiles pour comprendre le modèle.
+data/*
+!data/controls/
+*.db
+*.db-journal
+*.db-wal
+*.sqlite
+*.sqlite3
+*.duckdb
+*.parquet
+*.feather
+*.arrow
+*.csv
+*.xlsx
+*.xls
+*.zip
+
+# --- Logs, checkpoints, sorties d'exécution ---------------------------------
+logs/
+*.log
+checkpoints/
+runs/
+outputs/
+tmp/
+.tmp/
+
+# --- Médias & polices (Kilo n'en a pas besoin) ------------------------------
+*.png
+*.jpg
+*.jpeg
+*.gif
+*.webp
+*.ico
+*.woff
+*.woff2
+*.ttf
+*.otf
+*.pdf
+# ...sauf les maquettes de la spec
+!docs/specs/maquettes/*.png
+
+# --- Documentation volumineuse ----------------------------------------------
+# ~1 800 lignes : à commenter UNIQUEMENT pendant le lot L7 (mise à jour de la doc).
+DOCUMENTATION_TECHNIQUE.md
+
+# --- Outils & IDE -------------------------------------------------------------
+.git/
+.idea/
+.vscode/
+*.code-workspace
+.DS_Store
+Thumbs.db
